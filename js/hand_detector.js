@@ -188,11 +188,20 @@ class HandDetector {
     if (!this.isStreaming) return;
 
     // Jika sedang memproses frame AI sebelumnya, jangan tumpuk antrean!
-    // Langsung render video kamera agar layar selalu 60 FPS mulus tanpa jeda!
     if (this.isModelReady && this.aiModel && !this.isInferring && this.video.readyState >= 2 && !this.video.paused) {
       this.isInferring = true;
 
-      // Gambar ke canvas resolusi kecil untuk inferensi AI
+      // Sesuaikan aspect ratio aiCanvas dengan video asli secara proporsional
+      if (this.video.videoWidth && this.video.videoHeight) {
+        const scale = Math.min(1, 640 / this.video.videoWidth);
+        const targetW = Math.round(this.video.videoWidth * scale);
+        const targetH = Math.round(this.video.videoHeight * scale);
+        if (this.aiCanvas.width !== targetW || this.aiCanvas.height !== targetH) {
+          this.aiCanvas.width = targetW;
+          this.aiCanvas.height = targetH;
+        }
+      }
+
       this.aiCtx.drawImage(this.video, 0, 0, this.aiCanvas.width, this.aiCanvas.height);
 
       this.aiModel.send({ image: this.aiCanvas })
@@ -428,13 +437,52 @@ class HandDetector {
       ctx.fill();
     });
 
-    // Lingkaran Kepala
-    if (pose[0] && (!pose[0].visibility || pose[0].visibility > 0.35)) {
-      ctx.strokeStyle = 'rgba(0, 242, 254, 0.6)';
-      ctx.lineWidth = 2;
+    // Garis Leher, Dada, dan Kepala (Validasi Anatomi Ketat)
+    if (pose[11] && pose[12]) {
+      const neckX = (pose[11].x + pose[12].x) / 2 * w;
+      const neckY = (pose[11].y + pose[12].y) / 2 * h;
+      const shoulderDist = Math.hypot(pose[11].x - pose[12].x, pose[11].y - pose[12].y) * w;
+      const shoulderYNorm = (pose[11].y + pose[12].y) / 2;
+
+      // Titik Pusat Dada (Strictly di bawah leher / tengah dada)
+      const chestY = neckY + Math.max(16, shoulderDist * 0.35);
+
+      // Node Dada (Titik Pusat Dada - Cyber Neon Green)
+      ctx.fillStyle = '#00ffa3';
       ctx.beginPath();
-      ctx.arc(pose[0].x * w, pose[0].y * h, 26, 0, 2 * Math.PI);
+      ctx.arc(neckX, chestY, 4, 0, 2 * Math.PI);
+      ctx.fill();
+
+      // Garis penghubung leher ke dada (Sternum)
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(0, 255, 163, 0.45)';
+      ctx.beginPath();
+      ctx.moveTo(neckX, neckY);
+      ctx.lineTo(neckX, chestY);
       ctx.stroke();
+
+      // Kepala / Muka: HANYA valid jika nose berada DI ATAS BAHU (pose[0].y < shoulderYNorm - 0.03)
+      // Mencegah lingkaran kepala pernah muncul di area dada!
+      if (pose[0] && pose[0].y < shoulderYNorm - 0.03 && (!pose[0].visibility || pose[0].visibility > 0.35)) {
+        const noseX = pose[0].x * w;
+        const noseY = pose[0].y * h;
+
+        // Garis Leher (Dari Hidung ke Tengah Bahu)
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0, 242, 254, 0.6)';
+        ctx.beginPath();
+        ctx.moveTo(noseX, noseY);
+        ctx.lineTo(neckX, neckY);
+        ctx.stroke();
+
+        // Lingkaran Kepala di sekeliling muka
+        const faceRadius = Math.max(18, Math.min(42, shoulderDist * 0.22));
+        ctx.strokeStyle = 'rgba(0, 242, 254, 0.75)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(noseX, noseY, faceRadius, 0, 2 * Math.PI);
+        ctx.stroke();
+      }
     }
   }
 

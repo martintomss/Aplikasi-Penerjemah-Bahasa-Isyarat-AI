@@ -1,5 +1,5 @@
-// sign_recognizer.js - Engine Pengenalan Bahasa Isyarat Full-Body & Body-Anchored (v5.0)
-// Mendukung pengenalan berbasis posisi tubuh (Kepala, Mulut, Dada, Torso, Lengan) + Kanonikal 21 Sendi Tangan
+// sign_recognizer.js - Engine Pengenalan Bahasa Isyarat Presisi Tinggi (v7.0 Pemisah Tegas Muka vs Dada)
+// Memisahkan secara tegas zona anatomi: MUKA (di atas bahu) vs DADA (di bawah bahu)
 
 class SignRecognizer {
   constructor() {
@@ -12,7 +12,7 @@ class SignRecognizer {
     return Math.hypot(p1.x - p2.x, p1.y - p2.y);
   }
 
-  // 1. Transformasi Kanonikal Tangan
+  // Transformasi Kanonikal Tangan (21 Sendi)
   toCanonical(landmarks) {
     if (!landmarks || landmarks.length < 21) return null;
 
@@ -43,8 +43,8 @@ class SignRecognizer {
     }));
   }
 
-  // 2. Ekstraksi Fitur Tangan dalam Ruang Kanonikal
-  extractHandFeatures(landmarks, rawLandmarks) {
+  // Ekstraksi Status Jari Kanonikal
+  extractHandFeatures(landmarks) {
     const c = this.toCanonical(landmarks);
     if (!c) return null;
 
@@ -55,17 +55,16 @@ class SignRecognizer {
 
     const isThumbSide = c[4].x < -0.65 || this.dist(c[4], c[17]) > 1.1;
 
-    // Cek jempol ke atas pada koordinat asli
-    const rawWrist = rawLandmarks[0];
-    const rawThumbTip = rawLandmarks[4];
-    const rawThumbMcp = rawLandmarks[2];
-    const rawIndexMcp = rawLandmarks[5];
+    // Jempol ke atas pada koordinat asli
+    const rawWrist = landmarks[0];
+    const rawThumbTip = landmarks[4];
+    const rawThumbMcp = landmarks[2];
+    const rawIndexMcp = landmarks[5];
     const rawThumbUp = (rawThumbTip.y < rawThumbMcp.y) && (rawThumbTip.y < rawIndexMcp.y);
     const rawThumbDown = (rawThumbTip.y > rawWrist.y);
 
     const extendedCount = (isIndex ? 1 : 0) + (isMiddle ? 1 : 0) + (isRing ? 1 : 0) + (isPinky ? 1 : 0);
     const isFist = extendedCount === 0;
-
     const isThumb = isThumbSide || (rawThumbUp && isFist);
 
     const pinchIndex = this.dist(c[4], c[8]);
@@ -89,44 +88,63 @@ class SignRecognizer {
       extendedCount,
       totalExtended: extendedCount + (isThumb ? 1 : 0),
       isFist,
-      wrist: rawLandmarks[0],
-      indexTip: rawLandmarks[8],
-      thumbTip: rawLandmarks[4]
+      wrist: landmarks[0],
+      indexTip: landmarks[8],
+      thumbTip: landmarks[4]
     };
   }
 
-  // 3. DETEKSI BERBASIS POSISI TUBUH (BODY-ANCHORED GESTURES)
+  // 1. ZONA ANATOMI TUBUH TEGAS (MUKA VS DADA)
+  // Menjamin Dada tidak pernah tertukar dengan Muka!
   detectBodyAnchored(pose, hands) {
     if (!pose || !pose[11] || !pose[12]) return null;
 
-    // Titik Patokan Tubuh (Body Anchors)
-    const mouth = (pose[9] && pose[10]) ? { x: (pose[9].x + pose[10].x) / 2, y: (pose[9].y + pose[10].y) / 2 } : pose[0];
-    const chest = { x: (pose[11].x + pose[12].x) / 2, y: (pose[11].y + pose[12].y) / 2 };
-    const forehead = pose[0] ? { x: pose[0].x, y: pose[0].y - 0.08 } : chest;
-    const shoulderWidth = Math.max(0.15, this.dist(pose[11], pose[12]));
+    // Garis Batas Kunci Anatomi
+    const shoulderLeft = pose[11];
+    const shoulderRight = pose[12];
+    const shoulderY = (shoulderLeft.y + shoulderRight.y) / 2; // Garis batas horizontal bahu
+    const shoulderWidth = Math.max(0.18, this.dist(shoulderLeft, shoulderRight));
+
+    // Titik Pusat Dada (Strictly DI BAWAH BAHU)
+    const chestX = (shoulderLeft.x + shoulderRight.x) / 2;
+    const chestY = shoulderY + shoulderWidth * 0.35; // Berada 35% lebar bahu di bawah garis bahu
+    const chest = { x: chestX, y: chestY };
+
+    // Validasi Anatomi: Hidung & Muka HARUS berada di ATAS garis bahu!
+    const isNoseValid = pose[0] && pose[0].y < shoulderY - 0.03;
+    const nose = isNoseValid ? pose[0] : { x: chestX, y: shoulderY - shoulderWidth * 0.45 };
+
+    const mouth = (pose[9] && pose[10] && pose[9].y < shoulderY)
+      ? { x: (pose[9].x + pose[10].x) / 2, y: (pose[9].y + pose[10].y) / 2 }
+      : { x: nose.x, y: Math.min(shoulderY - 0.04, nose.y + 0.05) };
+    const forehead = { x: nose.x, y: nose.y - 0.08 };
 
     const leftWrist = pose[15];
     const rightWrist = pose[16];
 
-    // a. CINTA / SAYANG (Kedua tangan menyilang di dada)
-    if (leftWrist && rightWrist) {
-      const distCross1 = this.dist(leftWrist, pose[12]); // Pergelangan kiri dekat bahu kanan
-      const distCross2 = this.dist(rightWrist, pose[11]); // Pergelangan kanan dekat bahu kiri
-      if (distCross1 < shoulderWidth * 0.7 && distCross2 < shoulderWidth * 0.7) {
+    // ========================================================
+    // A. ZONA DADA (STRICTLY DI BAWAH GARIS BAHU: Y > shoulderY)
+    // ========================================================
+
+    // 1. CINTA / SAYANG (Kedua tangan menyilang mendekap dada)
+    if (leftWrist && rightWrist && leftWrist.y > shoulderY - 0.05 && rightWrist.y > shoulderY - 0.05) {
+      const distCross1 = this.dist(leftWrist, shoulderRight);
+      const distCross2 = this.dist(rightWrist, shoulderLeft);
+      if (distCross1 < shoulderWidth * 0.65 && distCross2 < shoulderWidth * 0.65) {
         return { id: 'cinta', text: 'Cinta ❤️', label: 'Cinta (Peluk Dada)', type: 'word', confidence: 0.99 };
       }
     }
 
-    // b. TOLONG / MOHON (Kedua tangan rapat di depan dada)
-    if (leftWrist && rightWrist) {
+    // 2. TOLONG / MOHON (Kedua tangan rapat di depan dada)
+    if (leftWrist && rightWrist && leftWrist.y > shoulderY - 0.05 && rightWrist.y > shoulderY - 0.05) {
       const distBetweenWrists = this.dist(leftWrist, rightWrist);
       const distToChest = this.dist(leftWrist, chest);
-      if (distBetweenWrists < shoulderWidth * 0.4 && distToChest < shoulderWidth * 0.8) {
+      if (distBetweenWrists < shoulderWidth * 0.45 && distToChest < shoulderWidth * 0.75) {
         return { id: 'tolong', text: 'Tolong / Mohon 🙏', label: 'Tolong (Dua Tangan di Dada)', type: 'word', confidence: 0.98 };
       }
     }
 
-    // c. RUMAH (Kedua tangan membentuk atap di depan dada/wajah)
+    // 3. RUMAH (Kedua tangan membentuk atap di depan dada)
     if (hands && hands.length >= 2) {
       const h1Tip = hands[0].landmarks[8];
       const h2Tip = hands[1].landmarks[8];
@@ -137,50 +155,56 @@ class SignRecognizer {
       }
     }
 
-    // d. GESTUR SATU TANGAN TERHADAP TUBUH
+    // GESTUR SATU TANGAN DENGAN PEMISAH ZONA TEGAS
     if (hands && hands.length > 0) {
       const h = hands[0];
-      const f = this.extractHandFeatures(h.landmarks, h.landmarks);
+      const f = this.extractHandFeatures(h.landmarks);
       if (!f) return null;
 
-      const handPos = f.wrist;
+      const handY = f.wrist.y;
       const indexTip = f.indexTip;
 
-      // MAKAN (Tangan menguncup di dekat mulut)
-      if (this.dist(handPos, mouth) < shoulderWidth * 0.45 && f.totalExtended <= 2) {
-        return { id: 'makan', text: 'Makan 🍽️', label: 'Makan (Dekat Mulut)', type: 'word', confidence: 0.97 };
+      // --- ZONA DADA (handY > shoulderY - 0.02 && indexTip.y > shoulderY - 0.05) ---
+      if (handY > shoulderY - 0.02 && indexTip.y > shoulderY - 0.05) {
+        // SAYA / AKU: Telunjuk menunjuk tepat ke DADA sendiri
+        if (this.dist(indexTip, chest) < shoulderWidth * 0.45 && f.index && !f.middle) {
+          return { id: 'saya', text: 'Saya', label: 'Saya / Aku (Dada)', type: 'word', confidence: 0.98 };
+        }
+
+        // MAAF: Kepalan tangan berada di DADA
+        if (this.dist(f.wrist, chest) < shoulderWidth * 0.5 && f.isFist) {
+          return { id: 'maaf', text: 'Maaf 🙇', label: 'Maaf (Tangan di Dada)', type: 'word', confidence: 0.97 };
+        }
       }
 
-      // MINUM (Bentuk C di dekat mulut)
-      if (this.dist(handPos, mouth) < shoulderWidth * 0.5 && f.pinchIndex > 0.35 && f.pinchIndex < 0.8) {
-        return { id: 'minum', text: 'Minum 🥤', label: 'Minum (Gelas di Mulut)', type: 'word', confidence: 0.97 };
-      }
+      // --- ZONA MUKA (STRICTLY DI ATAS BAHU: handY < shoulderY && indexTip.y < shoulderY - 0.04) ---
+      if (handY < shoulderY && indexTip.y < shoulderY - 0.04) {
+        // MAKAN: Tangan menguncup persis di MULUT (bukan di dada!)
+        if (this.dist(indexTip, mouth) < shoulderWidth * 0.35 && f.totalExtended <= 2) {
+          return { id: 'makan', text: 'Makan 🍽️', label: 'Makan (Di Mulut)', type: 'word', confidence: 0.97 };
+        }
 
-      // PAHAM / BELAJAR (Di dekat dahi / pelipis)
-      if (this.dist(indexTip, forehead) < shoulderWidth * 0.45 && f.index) {
-        return { id: 'paham', text: 'Paham 💡', label: 'Paham / Mengerti (Dahi)', type: 'word', confidence: 0.97 };
-      }
+        // MINUM: Bentuk cangkir C di MULUT
+        if (this.dist(f.wrist, mouth) < shoulderWidth * 0.4 && f.pinchIndex > 0.35 && f.pinchIndex < 0.8) {
+          return { id: 'minum', text: 'Minum 🥤', label: 'Minum (Di Mulut)', type: 'word', confidence: 0.97 };
+        }
 
-      // SAYA / AKU (Telunjuk menunjuk langsung ke dada sendiri)
-      if (this.dist(indexTip, chest) < shoulderWidth * 0.38 && f.index && !f.middle) {
-        return { id: 'saya', text: 'Saya', label: 'Saya / Aku (Dada)', type: 'word', confidence: 0.98 };
-      }
+        // PAHAM / BELAJAR: Di DAHI / PELIPIS
+        if (this.dist(indexTip, forehead) < shoulderWidth * 0.38 && f.index) {
+          return { id: 'paham', text: 'Paham 💡', label: 'Paham (Di Dahi)', type: 'word', confidence: 0.97 };
+        }
 
-      // MAAF (Kepalan di depan dada)
-      if (this.dist(handPos, chest) < shoulderWidth * 0.45 && f.isFist) {
-        return { id: 'maaf', text: 'Maaf 🙇', label: 'Maaf (Tangan di Dada)', type: 'word', confidence: 0.96 };
-      }
-
-      // TERIMA KASIH (Tangan mendatar dari dagu ke depan)
-      if (this.dist(handPos, mouth) < shoulderWidth * 0.55 && f.extendedCount >= 3) {
-        return { id: 'terima_kasih', text: 'Terima Kasih 🙏', label: 'Terima Kasih (Dagu)', type: 'word', confidence: 0.96 };
+        // TERIMA KASIH: Tangan datar di DAGU
+        if (this.dist(f.wrist, mouth) < shoulderWidth * 0.42 && f.extendedCount >= 3) {
+          return { id: 'terima_kasih', text: 'Terima Kasih 🙏', label: 'Terima Kasih (Dagu)', type: 'word', confidence: 0.96 };
+        }
       }
     }
 
     return null;
   }
 
-  // 4. KLASIFIKASI UTAMA (BODY + HANDS)
+  // 2. KLASIFIKASI UTAMA
   recognize(inputData) {
     if (!inputData) {
       this.predictionWindow = [];
@@ -189,19 +213,19 @@ class SignRecognizer {
 
     const { pose, hands } = inputData;
 
-    // 1. Cek Gestur Berbasis Posisi Tubuh (Prioritas Tertinggi)
+    // 1. Cek Gestur Posisi Tubuh Tegas (Muka vs Dada)
     if (pose) {
       const bodyGesture = this.detectBodyAnchored(pose, hands);
       if (bodyGesture) return this.voteFilter(bodyGesture, null);
     }
 
-    // 2. Jika tidak ada gestur tubuh khusus, gunakan klasifikasi kanonikal tangan
+    // 2. Gestur Jari Kanonikal (Bebas Rotasi)
     if (!hands || hands.length === 0) {
       return null;
     }
 
     const primaryHand = hands[0];
-    const f = this.extractHandFeatures(primaryHand.landmarks, primaryHand.landmarks);
+    const f = this.extractHandFeatures(primaryHand.landmarks);
     if (!f) return null;
 
     const diagnostic = {
