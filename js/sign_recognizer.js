@@ -1,10 +1,231 @@
-// sign_recognizer.js - Engine Pengenalan Bahasa Isyarat Presisi Tinggi (v7.0 Pemisah Tegas Muka vs Dada)
-// Memisahkan secara tegas zona anatomi: MUKA (di atas bahu) vs DADA (di bawah bahu)
+// sign_recognizer.js - Engine Pengenalan Bahasa Isyarat Video Time-Series (v8.0 AI Motion Tracker)
+// Mendeteksi gerakan video dinamis seiring waktu (bukan sekadar gambar diam)
+// Melacak trajektori, arah, kecepatan, osilasi lambaian, putaran, dan pemisah anatomi Muka vs Dada
 
+// ============================================================================
+// 1. ANALYZER GERAKAN VIDEO DINAMIS (TIME-SERIES VIDEO TRAJECTORY ENGINE)
+// ============================================================================
+class VideoMotionAnalyzer {
+  constructor() {
+    this.history = []; // Buffer titik riwayat { t, wrist, indexTip, chest, mouth, shoulderY, shoulderWidth }
+    this.maxWindowMs = 850; // Jendela analisis video kontinu rentang 850 milidetik
+  }
+
+  addFrame(data) {
+    const now = performance.now();
+    const { pose, hands } = data || {};
+
+    let wrist = null;
+    let indexTip = null;
+
+    if (hands && hands.length > 0 && hands[0].landmarks) {
+      wrist = hands[0].landmarks[0];
+      indexTip = hands[0].landmarks[8];
+    } else if (pose) {
+      const activeHand = (pose[16] && (pose[16].visibility || 1) > 0.35) ? pose[16]
+                       : ((pose[15] && (pose[15].visibility || 1) > 0.35) ? pose[15] : null);
+      if (activeHand) {
+        wrist = activeHand;
+        indexTip = pose[20] || pose[19] || activeHand;
+      }
+    }
+
+    let shoulderY = 0.5;
+    let shoulderWidth = 0.25;
+    let chest = { x: 0.5, y: 0.6 };
+    let mouth = { x: 0.5, y: 0.4 };
+
+    if (pose && pose[11] && pose[12]) {
+      shoulderY = (pose[11].y + pose[12].y) / 2;
+      shoulderWidth = Math.max(0.18, Math.hypot(pose[11].x - pose[12].x, pose[11].y - pose[12].y));
+      chest = { x: (pose[11].x + pose[12].x) / 2, y: shoulderY + shoulderWidth * 0.35 };
+      const isNoseValid = pose[0] && pose[0].y < shoulderY - 0.03;
+      const nose = isNoseValid ? pose[0] : { x: chest.x, y: shoulderY - shoulderWidth * 0.45 };
+      mouth = (pose[9] && pose[10] && pose[9].y < shoulderY)
+        ? { x: (pose[9].x + pose[10].x) / 2, y: (pose[9].y + pose[10].y) / 2 }
+        : { x: nose.x, y: Math.min(shoulderY - 0.04, nose.y + 0.05) };
+    }
+
+    if (wrist) {
+      this.history.push({
+        t: now,
+        wrist: { x: wrist.x, y: wrist.y, z: wrist.z || 0 },
+        indexTip: indexTip ? { x: indexTip.x, y: indexTip.y } : null,
+        chest,
+        mouth,
+        shoulderY,
+        shoulderWidth
+      });
+    }
+
+    // Prune data yang lebih tua dari maxWindowMs
+    this.history = this.history.filter(h => now - h.t <= this.maxWindowMs);
+  }
+
+  analyze() {
+    if (this.history.length < 4) {
+      return {
+        motionType: 'stationary',
+        speed: 0,
+        isWaving: false,
+        isCircular: false,
+        isMovingUp: false,
+        isMovingDown: false,
+        isForwardFromChin: false,
+        isTapping: false,
+        isStationary: true,
+        label: 'Posisi Diam'
+      };
+    }
+
+    const first = this.history[0];
+    const latest = this.history[this.history.length - 1];
+    const dt = (latest.t - first.t) / 1000;
+    if (dt < 0.12) {
+      return { motionType: 'stationary', speed: 0, isStationary: true, label: 'Posisi Diam' };
+    }
+
+    // 1. Total Path & Speed
+    let totalPath = 0;
+    for (let i = 1; i < this.history.length; i++) {
+      const p1 = this.history[i - 1].wrist;
+      const p2 = this.history[i].wrist;
+      totalPath += Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    }
+    const speed = totalPath / dt;
+    const netDx = latest.wrist.x - first.wrist.x;
+    const netDy = latest.wrist.y - first.wrist.y;
+    const isStationary = speed < 0.16 && totalPath < 0.07;
+
+    // 2. Deteksi Lambaian Tangan Video (Waving) -> "Halo" / "Sampai Jumpa"
+    let dirChangesX = 0;
+    let prevSign = 0;
+    for (let i = 1; i < this.history.length; i++) {
+      const dx = this.history[i].wrist.x - this.history[i - 1].wrist.x;
+      if (Math.abs(dx) > 0.007) {
+        const sign = dx > 0 ? 1 : -1;
+        if (prevSign !== 0 && sign !== prevSign) {
+          dirChangesX++;
+        }
+        prevSign = sign;
+      }
+    }
+    const isWaving = dirChangesX >= 2 && totalPath > 0.08;
+
+    // 3. Deteksi Gerakan Memutar Melingkar di Dada (Circular) -> "Maaf"
+    let isCircular = false;
+    if (this.history.length >= 7 && speed > 0.12) {
+      let cx = 0, cy = 0;
+      this.history.forEach(h => { cx += h.wrist.x; cy += h.wrist.y; });
+      cx /= this.history.length;
+      cy /= this.history.length;
+
+      let totalAngle = 0;
+      let prevAngle = Math.atan2(this.history[0].wrist.y - cy, this.history[0].wrist.x - cx);
+      for (let i = 1; i < this.history.length; i++) {
+        const currAngle = Math.atan2(this.history[i].wrist.y - cy, this.history[i].wrist.x - cx);
+        let dAngle = currAngle - prevAngle;
+        while (dAngle > Math.PI) dAngle -= 2 * Math.PI;
+        while (dAngle < -Math.PI) dAngle += 2 * Math.PI;
+        totalAngle += dAngle;
+        prevAngle = currAngle;
+      }
+
+      // Minimal putaran 200 derajat (1.1 * PI) di depan dada
+      if (Math.abs(totalAngle) > Math.PI * 1.1 && latest.wrist.y > latest.shoulderY - 0.05) {
+        const distChest = Math.hypot(latest.wrist.x - latest.chest.x, latest.wrist.y - latest.chest.y);
+        if (distChest < latest.shoulderWidth * 0.55) {
+          isCircular = true;
+        }
+      }
+    }
+
+    // 4. Deteksi Gerakan Naik Vertikal (Upward) -> "Selamat Pagi"
+    const isMovingUp = netDy < -0.09 && Math.abs(netDy) > Math.abs(netDx) * 1.15;
+
+    // 5. Deteksi Gerakan Turun Vertikal (Downward) -> "Selamat Malam"
+    const isMovingDown = netDy > 0.09 && Math.abs(netDy) > Math.abs(netDx) * 1.15;
+
+    // 6. Deteksi Gerakan Maju Menjauh dari Dagu -> "Terima Kasih"
+    const distToMouthStart = Math.hypot(first.wrist.x - first.mouth.x, first.wrist.y - first.mouth.y);
+    const distToMouthEnd = Math.hypot(latest.wrist.x - latest.mouth.x, latest.wrist.y - latest.mouth.y);
+    const isForwardFromChin = (distToMouthStart < latest.shoulderWidth * 0.45) &&
+                              (distToMouthEnd > distToMouthStart + 0.045) &&
+                              (netDy > 0.015 || Math.abs(netDx) > 0.02);
+
+    // 7. Deteksi Ketukan Berulang di Mulut (Tapping) -> "Makan"
+    let tapReversals = 0;
+    let prevDistSign = 0;
+    for (let i = 1; i < this.history.length; i++) {
+      const d1 = Math.hypot(this.history[i - 1].wrist.x - this.history[i - 1].mouth.x, this.history[i - 1].wrist.y - this.history[i - 1].mouth.y);
+      const d2 = Math.hypot(this.history[i].wrist.x - this.history[i].mouth.x, this.history[i].wrist.y - this.history[i].mouth.y);
+      const dd = d2 - d1;
+      if (Math.abs(dd) > 0.005) {
+        const sign = dd > 0 ? 1 : -1;
+        if (prevDistSign !== 0 && sign !== prevDistSign) {
+          tapReversals++;
+        }
+        prevDistSign = sign;
+      }
+    }
+    const isTapping = tapReversals >= 2 && latest.wrist.y < latest.shoulderY;
+
+    let motionType = 'stationary';
+    let label = 'Posisi Stabil';
+
+    if (isWaving) {
+      motionType = 'waving';
+      label = 'Melambai (Wave)';
+    } else if (isCircular) {
+      motionType = 'circular';
+      label = 'Memutar di Dada';
+    } else if (isForwardFromChin) {
+      motionType = 'forward';
+      label = 'Maju dari Dagu';
+    } else if (isMovingUp) {
+      motionType = 'upward';
+      label = 'Gerakan Naik (Pagi)';
+    } else if (isMovingDown) {
+      motionType = 'downward';
+      label = 'Gerakan Turun (Malam)';
+    } else if (isTapping) {
+      motionType = 'tapping';
+      label = 'Mengetuk di Mulut';
+    } else if (!isStationary) {
+      motionType = 'moving';
+      label = 'Bergerak Dinamis';
+    }
+
+    return {
+      motionType,
+      label,
+      speed,
+      totalPath,
+      netDx,
+      netDy,
+      isWaving,
+      isCircular,
+      isMovingUp,
+      isMovingDown,
+      isForwardFromChin,
+      isTapping,
+      isStationary
+    };
+  }
+
+  reset() {
+    this.history = [];
+  }
+}
+
+// ============================================================================
+// 2. ENGINE PENGENALAN BAHASA ISYARAT UTAMA
+// ============================================================================
 class SignRecognizer {
   constructor() {
     this.predictionWindow = [];
     this.windowSize = 5;
+    this.motionAnalyzer = new VideoMotionAnalyzer();
   }
 
   dist(p1, p2) {
@@ -12,7 +233,7 @@ class SignRecognizer {
     return Math.hypot(p1.x - p2.x, p1.y - p2.y);
   }
 
-  // Transformasi Kanonikal Tangan (21 Sendi)
+  // Transformasi Kanonikal Tangan 3D (Bebas Rotasi & Skala)
   toCanonical(landmarks) {
     if (!landmarks || landmarks.length < 21) return null;
 
@@ -94,26 +315,24 @@ class SignRecognizer {
     };
   }
 
-  // 1. ZONA ANATOMI TUBUH TEGAS (MUKA VS DADA)
-  // Menjamin Dada tidak pernah tertukar dengan Muka!
-  detectBodyAnchored(pose, hands) {
+  // 1. ZONA ANATOMI TUBUH & GESTUR VIDEO DINAMIS
+  detectBodyAnchored(pose, hands, motion) {
     if (!pose || !pose[11] || !pose[12]) return null;
 
-    // Garis Batas Kunci Anatomi
+    // Garis Batas Kunci Bahu
     const shoulderLeft = pose[11];
     const shoulderRight = pose[12];
-    const shoulderY = (shoulderLeft.y + shoulderRight.y) / 2; // Garis batas horizontal bahu
+    const shoulderY = (shoulderLeft.y + shoulderRight.y) / 2;
     const shoulderWidth = Math.max(0.18, this.dist(shoulderLeft, shoulderRight));
 
-    // Titik Pusat Dada (Strictly DI BAWAH BAHU)
+    // Titik Dada (Strictly DI BAWAH BAHU)
     const chestX = (shoulderLeft.x + shoulderRight.x) / 2;
-    const chestY = shoulderY + shoulderWidth * 0.35; // Berada 35% lebar bahu di bawah garis bahu
+    const chestY = shoulderY + shoulderWidth * 0.35;
     const chest = { x: chestX, y: chestY };
 
-    // Validasi Anatomi: Hidung & Muka HARUS berada di ATAS garis bahu!
+    // Validasi Anatomi: Hidung & Muka HARUS berada di ATAS bahu!
     const isNoseValid = pose[0] && pose[0].y < shoulderY - 0.03;
     const nose = isNoseValid ? pose[0] : { x: chestX, y: shoulderY - shoulderWidth * 0.45 };
-
     const mouth = (pose[9] && pose[10] && pose[9].y < shoulderY)
       ? { x: (pose[9].x + pose[10].x) / 2, y: (pose[9].y + pose[10].y) / 2 }
       : { x: nose.x, y: Math.min(shoulderY - 0.04, nose.y + 0.05) };
@@ -123,7 +342,7 @@ class SignRecognizer {
     const rightWrist = pose[16];
 
     // ========================================================
-    // A. ZONA DADA (STRICTLY DI BAWAH GARIS BAHU: Y > shoulderY)
+    // A. GESTUR VIDEO DUA TANGAN (TWO HANDS)
     // ========================================================
 
     // 1. CINTA / SAYANG (Kedua tangan menyilang mendekap dada)
@@ -131,7 +350,7 @@ class SignRecognizer {
       const distCross1 = this.dist(leftWrist, shoulderRight);
       const distCross2 = this.dist(rightWrist, shoulderLeft);
       if (distCross1 < shoulderWidth * 0.65 && distCross2 < shoulderWidth * 0.65) {
-        return { id: 'cinta', text: 'Cinta ❤️', label: 'Cinta (Peluk Dada)', type: 'word', confidence: 0.99 };
+        return { id: 'cinta', text: 'Cinta ❤️', label: 'Cinta (Peluk Dada)', type: 'word', confidence: 0.99, motion };
       }
     }
 
@@ -140,22 +359,52 @@ class SignRecognizer {
       const distBetweenWrists = this.dist(leftWrist, rightWrist);
       const distToChest = this.dist(leftWrist, chest);
       if (distBetweenWrists < shoulderWidth * 0.45 && distToChest < shoulderWidth * 0.75) {
-        return { id: 'tolong', text: 'Tolong / Mohon 🙏', label: 'Tolong (Dua Tangan di Dada)', type: 'word', confidence: 0.98 };
+        return { id: 'tolong', text: 'Tolong / Mohon 🙏', label: 'Tolong (Dua Tangan di Dada)', type: 'word', confidence: 0.98, motion };
       }
     }
 
-    // 3. RUMAH (Kedua tangan membentuk atap di depan dada)
+    // 3. RUMAH (Kedua tangan membentuk atap segitiga di depan dada)
     if (hands && hands.length >= 2) {
       const h1Tip = hands[0].landmarks[8];
       const h2Tip = hands[1].landmarks[8];
       const distTips = this.dist(h1Tip, h2Tip);
       const distWrists = this.dist(hands[0].landmarks[0], hands[1].landmarks[0]);
       if (distTips < shoulderWidth * 0.35 && distWrists > shoulderWidth * 0.6) {
-        return { id: 'rumah', text: 'Rumah 🏠', label: 'Rumah (Atap Segitiga)', type: 'word', confidence: 0.98 };
+        return { id: 'rumah', text: 'Rumah 🏠', label: 'Rumah (Atap Segitiga)', type: 'word', confidence: 0.98, motion };
       }
     }
 
-    // GESTUR SATU TANGAN DENGAN PEMISAH ZONA TEGAS
+    // ========================================================
+    // B. GESTUR VIDEO DINAMIS (TIME-SERIES VIDEO MOTIONS)
+    // ========================================================
+
+    // 4. HALO / SAMPAI JUMPA: Lambaian Tangan Video (Waving)
+    if (motion && motion.isWaving) {
+      const activeWristY = (hands && hands[0]) ? hands[0].landmarks[0].y : (leftWrist ? leftWrist.y : 0.5);
+      if (activeWristY < shoulderY - 0.05) {
+        return { id: 'sampai_jumpa', text: 'Sampai Jumpa!', label: 'Sampai Jumpa (Lambaian)', type: 'word', confidence: 0.99, motion };
+      }
+      return { id: 'halo', text: 'Halo! 👋', label: 'Halo (Lambaian Tangan)', type: 'word', confidence: 0.99, motion };
+    }
+
+    // 5. TERIMA KASIH: Gerakan Maju Menjauh dari Dagu ke Depan
+    if (motion && motion.isForwardFromChin) {
+      return { id: 'terima_kasih', text: 'Terima Kasih 🙏', label: 'Terima Kasih (Maju dari Dagu)', type: 'word', confidence: 0.99, motion };
+    }
+
+    // 6. SELAMAT PAGI: Matahari Terbit (Gerakan Tangan Naik dari Bawah Dada ke Atas)
+    if (motion && motion.isMovingUp) {
+      return { id: 'selamat_pagi', text: 'Selamat Pagi 🌅', label: 'Selamat Pagi (Matahari Terbit)', type: 'word', confidence: 0.98, motion };
+    }
+
+    // 7. SELAMAT MALAM: Matahari Tenggelam (Gerakan Tangan Turun dari Wajah ke Bawah)
+    if (motion && motion.isMovingDown) {
+      return { id: 'selamat_malam', text: 'Selamat Malam 🌙', label: 'Selamat Malam (Matahari Tenggelam)', type: 'word', confidence: 0.98, motion };
+    }
+
+    // ========================================================
+    // C. GESTUR SATU TANGAN DENGAN PEMISAH ZONA TEGAS
+    // ========================================================
     if (hands && hands.length > 0) {
       const h = hands[0];
       const f = this.extractHandFeatures(h.landmarks);
@@ -166,60 +415,78 @@ class SignRecognizer {
 
       // --- ZONA DADA (handY > shoulderY - 0.02 && indexTip.y > shoulderY - 0.05) ---
       if (handY > shoulderY - 0.02 && indexTip.y > shoulderY - 0.05) {
-        // SAYA / AKU: Telunjuk menunjuk tepat ke DADA sendiri
-        if (this.dist(indexTip, chest) < shoulderWidth * 0.45 && f.index && !f.middle) {
-          return { id: 'saya', text: 'Saya', label: 'Saya / Aku (Dada)', type: 'word', confidence: 0.98 };
+        // MAAF: Gerakan Memutar di Dada (atau kepalan tangan di dada)
+        if (this.dist(f.wrist, chest) < shoulderWidth * 0.5 && f.isFist) {
+          const isRubbing = motion && motion.isCircular;
+          return {
+            id: 'maaf',
+            text: 'Maaf 🙇',
+            label: isRubbing ? 'Maaf (Memutar di Dada)' : 'Maaf (Tangan di Dada)',
+            type: 'word',
+            confidence: isRubbing ? 0.99 : 0.97,
+            motion
+          };
         }
 
-        // MAAF: Kepalan tangan berada di DADA
-        if (this.dist(f.wrist, chest) < shoulderWidth * 0.5 && f.isFist) {
-          return { id: 'maaf', text: 'Maaf 🙇', label: 'Maaf (Tangan di Dada)', type: 'word', confidence: 0.97 };
+        // SAYA / AKU: Telunjuk menunjuk tepat ke DADA sendiri
+        if (this.dist(indexTip, chest) < shoulderWidth * 0.45 && f.index && !f.middle) {
+          return { id: 'saya', text: 'Saya', label: 'Saya / Aku (Dada)', type: 'word', confidence: 0.98, motion };
         }
       }
 
       // --- ZONA MUKA (STRICTLY DI ATAS BAHU: handY < shoulderY && indexTip.y < shoulderY - 0.04) ---
       if (handY < shoulderY && indexTip.y < shoulderY - 0.04) {
-        // MAKAN: Tangan menguncup persis di MULUT (bukan di dada!)
-        if (this.dist(indexTip, mouth) < shoulderWidth * 0.35 && f.totalExtended <= 2) {
-          return { id: 'makan', text: 'Makan 🍽️', label: 'Makan (Di Mulut)', type: 'word', confidence: 0.97 };
+        // MAKAN: Ketukan ritmis atau ujung jari menguncup di MULUT
+        if (this.dist(indexTip, mouth) < shoulderWidth * 0.35 && (f.totalExtended <= 2 || (motion && motion.isTapping))) {
+          return { id: 'makan', text: 'Makan 🍽️', label: 'Makan (Di Mulut)', type: 'word', confidence: 0.98, motion };
         }
 
         // MINUM: Bentuk cangkir C di MULUT
         if (this.dist(f.wrist, mouth) < shoulderWidth * 0.4 && f.pinchIndex > 0.35 && f.pinchIndex < 0.8) {
-          return { id: 'minum', text: 'Minum 🥤', label: 'Minum (Di Mulut)', type: 'word', confidence: 0.97 };
+          return { id: 'minum', text: 'Minum 🥤', label: 'Minum (Di Mulut)', type: 'word', confidence: 0.98, motion };
         }
 
         // PAHAM / BELAJAR: Di DAHI / PELIPIS
         if (this.dist(indexTip, forehead) < shoulderWidth * 0.38 && f.index) {
-          return { id: 'paham', text: 'Paham 💡', label: 'Paham (Di Dahi)', type: 'word', confidence: 0.97 };
+          return { id: 'paham', text: 'Paham 💡', label: 'Paham (Di Dahi)', type: 'word', confidence: 0.98, motion };
         }
 
-        // TERIMA KASIH: Tangan datar di DAGU
+        // TERIMA KASIH: Posisi tangan di Dagu
         if (this.dist(f.wrist, mouth) < shoulderWidth * 0.42 && f.extendedCount >= 3) {
-          return { id: 'terima_kasih', text: 'Terima Kasih 🙏', label: 'Terima Kasih (Dagu)', type: 'word', confidence: 0.96 };
+          return { id: 'terima_kasih', text: 'Terima Kasih 🙏', label: 'Terima Kasih (Dagu)', type: 'word', confidence: 0.96, motion };
         }
+      }
+
+      // KAMU / ANDA: Jari telunjuk menunjuk lurus ke arah kamera (bukan ke dada)
+      if (f.index && !f.middle && !f.ring && !f.pinky && this.dist(indexTip, chest) > shoulderWidth * 0.5) {
+        return { id: 'kamu', text: 'Kamu', label: 'Kamu / Anda (Tunjuk Depan)', type: 'word', confidence: 0.98, motion };
       }
     }
 
     return null;
   }
 
-  // 2. KLASIFIKASI UTAMA
+  // 3. KLASIFIKASI UTAMA (FUSI VIDEO MOTION + HAND GEOMETRY)
   recognize(inputData) {
     if (!inputData) {
       this.predictionWindow = [];
+      this.motionAnalyzer.reset();
       return null;
     }
 
     const { pose, hands } = inputData;
 
-    // 1. Cek Gestur Posisi Tubuh Tegas (Muka vs Dada)
+    // A. Analisis Gerakan Video Kontinu
+    this.motionAnalyzer.addFrame(inputData);
+    const motion = this.motionAnalyzer.analyze();
+
+    // B. Prioritas 1: Cek Gestur Posisi Tubuh & Gerakan Video Dinamis
     if (pose) {
-      const bodyGesture = this.detectBodyAnchored(pose, hands);
-      if (bodyGesture) return this.voteFilter(bodyGesture, null);
+      const bodyGesture = this.detectBodyAnchored(pose, hands, motion);
+      if (bodyGesture) return this.voteFilter(bodyGesture, null, motion);
     }
 
-    // 2. Gestur Jari Kanonikal (Bebas Rotasi)
+    // C. Prioritas 2: Gestur Jari Tangan Kanonikal (Bebas Rotasi)
     if (!hands || hands.length === 0) {
       return null;
     }
@@ -234,7 +501,8 @@ class SignRecognizer {
       middle: f.middle ? 'Tengah Lurus' : 'Tengah Lipat',
       ring: f.ring ? 'Manis Lurus' : 'Manis Lipat',
       pinky: f.pinky ? 'Kelingking Lurus' : 'Kelingking Lipat',
-      total: f.totalExtended
+      total: f.totalExtended,
+      motion: motion.label
     };
 
     let candidate = null;
@@ -291,9 +559,13 @@ class SignRecognizer {
     else if (f.extendedCount === 4 && !f.thumb) {
       candidate = { id: 'B', text: 'B', label: 'Huruf B', type: 'letter', confidence: 0.96 };
     }
-    // HALO / ANGKA 5: [1, 1, 1, 1, 1]
+    // FUSI HALO (LAMBAIAN VIDEO) VS ANGKA 5 (TANGAN DIAM)
     else if (f.totalExtended >= 4 && f.index && f.middle && f.ring && f.pinky) {
-      candidate = { id: 'halo', text: 'Halo! 👋', label: 'Halo / Hai', type: 'word', confidence: 0.96 };
+      if (motion && motion.isWaving) {
+        candidate = { id: 'halo', text: 'Halo! 👋', label: 'Halo (Lambaian Tangan)', type: 'word', confidence: 0.99 };
+      } else {
+        candidate = { id: 'num_5', text: '5', label: 'Angka 5 (Tangan Diam)', type: 'number', confidence: 0.96 };
+      }
     }
     // HURUF D / ANGKA 1: [0, 1, 0, 0, 0]
     else if (f.index && !f.middle && !f.ring && !f.pinky && !f.thumb) {
@@ -321,7 +593,7 @@ class SignRecognizer {
     }
 
     if (candidate) {
-      return this.voteFilter(candidate, diagnostic);
+      return this.voteFilter(candidate, diagnostic, motion);
     }
 
     return {
@@ -330,13 +602,15 @@ class SignRecognizer {
       label: `Mendeteksi (${f.totalExtended} Jari)`,
       type: 'status',
       confidence: 0.85,
-      diagnostic
+      diagnostic,
+      motion
     };
   }
 
-  voteFilter(candidate, diagnostic) {
+  // Voting konsistensi temporal
+  voteFilter(candidate, diagnostic, motion) {
     if (!candidate || candidate.id === 'detecting') {
-      return { ...candidate, diagnostic };
+      return { ...candidate, diagnostic, motion };
     }
 
     this.predictionWindow.push(candidate);
@@ -362,12 +636,14 @@ class SignRecognizer {
     return {
       ...bestItem,
       consistency: maxCount / this.predictionWindow.length,
-      diagnostic
+      diagnostic,
+      motion
     };
   }
 
   reset() {
     this.predictionWindow = [];
+    if (this.motionAnalyzer) this.motionAnalyzer.reset();
   }
 }
 

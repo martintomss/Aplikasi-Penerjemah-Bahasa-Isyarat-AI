@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const handsCountBadge = document.getElementById('handsCountBadge');
   const bodyPartBadge = document.getElementById('bodyPartBadge');
   const bodyTrackingState = document.getElementById('bodyTrackingState');
+  const videoMotionBadge = document.getElementById('videoMotionBadge');
   const modeSelect = document.getElementById('modeSelect');
   const sensitivitySelect = document.getElementById('sensitivitySelect');
 
@@ -90,6 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!data) {
       updateBodyTags(null);
       translator.processGesture(null);
+      if (videoMotionBadge) videoMotionBadge.textContent = 'GERAKAN: MENUNGGU';
       hideHUDGesture();
       hideDiagnostic();
       return;
@@ -114,8 +116,44 @@ document.addEventListener('DOMContentLoaded', () => {
         : 'MENUNGGU SUBJEK';
     }
 
-    // Klasifikasi Gestur (Full-Body + Hands)
+    // Klasifikasi Gestur (Full-Body + Video Motion + Hands)
     const result = recognizer.recognize(data);
+
+    // Update Badge Status Gerakan Video Real-Time
+    if (videoMotionBadge) {
+      if (result && result.motion) {
+        const m = result.motion;
+        if (m.isWaving) {
+          videoMotionBadge.textContent = '🌊 GERAKAN: MELAMBAI (HALO)';
+          videoMotionBadge.style.color = '#00ffa3';
+        } else if (m.isCircular) {
+          videoMotionBadge.textContent = '🔄 GERAKAN: MEMUTAR DI DADA (MAAF)';
+          videoMotionBadge.style.color = '#00ffa3';
+        } else if (m.isForwardFromChin) {
+          videoMotionBadge.textContent = '↗️ GERAKAN: MAJU DARI DAGU';
+          videoMotionBadge.style.color = '#00ffa3';
+        } else if (m.isMovingUp) {
+          videoMotionBadge.textContent = '⬆️ GERAKAN: NAIK KE ATAS (PAGI)';
+          videoMotionBadge.style.color = '#00ffa3';
+        } else if (m.isMovingDown) {
+          videoMotionBadge.textContent = '⬇️ GERAKAN: TURUN KE BAWAH (MALAM)';
+          videoMotionBadge.style.color = '#00ffa3';
+        } else if (m.isTapping) {
+          videoMotionBadge.textContent = '🍽️ GERAKAN: MENGETUK DI MULUT';
+          videoMotionBadge.style.color = '#00ffa3';
+        } else if (m.isStationary) {
+          videoMotionBadge.textContent = '⏹️ POSISI DIAM (PRESISI TINGGI)';
+          videoMotionBadge.style.color = '#00f2fe';
+        } else {
+          videoMotionBadge.textContent = '⚡ BERGERAK DINAMIS';
+          videoMotionBadge.style.color = '#c77dff';
+        }
+      } else {
+        videoMotionBadge.textContent = 'GERAKAN: MENUNGGU';
+        videoMotionBadge.style.color = 'var(--text-muted)';
+      }
+    }
+
     if (result) {
       showHUDGesture(result);
       if (result.diagnostic) {

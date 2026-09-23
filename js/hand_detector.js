@@ -19,12 +19,8 @@ class HandDetector {
     this.frameCount = 0;
     this.fpsTimer = performance.now();
 
-    // Canvas terpisah berukuran kecil khusus untuk inferensi AI (480x270 / 640x360)
-    // Mengurangi beban komputasi CPU/GPU hingga 4x lipat!
-    this.aiCanvas = document.createElement('canvas');
-    this.aiCanvas.width = 640;
-    this.aiCanvas.height = 360;
-    this.aiCtx = this.aiCanvas.getContext('2d', { willReadFrequently: true });
+    // Jejak gerakan video dinamis (AR Neon Trajectory Trail)
+    this.motionTrail = [];
 
     // Smoothing EMA ringan
     this.prevPose = null;
@@ -183,32 +179,18 @@ class HandDetector {
     this.canvas.height = this.video.videoHeight;
   }
 
-  // 3. LOOP PEMROSESAN NON-BLOCKING (TIDAK MEMBUAT VIDEO STUTTER)
+  // 3. LOOP PEMROSESAN VIDEO STREAMING NATIVE (LIVE VIDEO INFERENCE)
   async processFrameLoop() {
     if (!this.isStreaming) return;
 
-    // Jika sedang memproses frame AI sebelumnya, jangan tumpuk antrean!
+    // Deteksi video langsung pada elemen HTMLVideoElement secara kontinu (Stream Video Asli)
     if (this.isModelReady && this.aiModel && !this.isInferring && this.video.readyState >= 2 && !this.video.paused) {
       this.isInferring = true;
 
-      // Sesuaikan aspect ratio aiCanvas dengan video asli secara proporsional
-      if (this.video.videoWidth && this.video.videoHeight) {
-        const scale = Math.min(1, 640 / this.video.videoWidth);
-        const targetW = Math.round(this.video.videoWidth * scale);
-        const targetH = Math.round(this.video.videoHeight * scale);
-        if (this.aiCanvas.width !== targetW || this.aiCanvas.height !== targetH) {
-          this.aiCanvas.width = targetW;
-          this.aiCanvas.height = targetH;
-        }
-      }
-
-      this.aiCtx.drawImage(this.video, 0, 0, this.aiCanvas.width, this.aiCanvas.height);
-
-      this.aiModel.send({ image: this.aiCanvas })
+      // Alirkan stream video langsung ke MediaPipe (WebGL hardware texture tracking antar frame)
+      this.aiModel.send({ image: this.video })
         .then(() => { this.isInferring = false; })
-        .catch(e => {
-          this.isInferring = false;
-        });
+        .catch(() => { this.isInferring = false; });
     }
 
     // Hitung FPS
@@ -271,6 +253,13 @@ class HandDetector {
 
       // Gambar Kerangka Full-Body dengan Rendering Super Cepat (Tanpa shadowBlur lambat)
       this.drawFastPoseSkeleton(ctx, pose, w, h);
+
+      // Gambar jejak gerakan video dinamis (AR Neon Trajectory Trail)
+      const handPt = (pose[16] && (pose[16].visibility || 1) > 0.35) ? pose[16]
+                   : ((pose[15] && (pose[15].visibility || 1) > 0.35) ? pose[15] : null);
+      if (handPt) {
+        this.updateAndDrawMotionTrail(ctx, handPt, w, h);
+      }
     }
 
     ctx.restore();
@@ -320,6 +309,12 @@ class HandDetector {
         this.drawFastHandSkeleton(ctx, rawLm, w, h, color, label);
         handsList.push({ landmarks: rawLm, handedness: idx === 0 ? 'Right' : 'Left', trail: [] });
       });
+
+      // Jejak gerakan video tangan utama
+      if (results.multiHandLandmarks[0]) {
+        const leadPt = results.multiHandLandmarks[0][8] || results.multiHandLandmarks[0][0];
+        this.updateAndDrawMotionTrail(ctx, leadPt, w, h);
+      }
     }
 
     ctx.restore();
@@ -361,6 +356,11 @@ class HandDetector {
     if (pose) this.drawFastPoseSkeleton(ctx, pose, w, h);
     if (leftHand) this.drawFastHandSkeleton(ctx, leftHand, w, h, '#00ffa3', 'Kiri');
     if (rightHand) this.drawFastHandSkeleton(ctx, rightHand, w, h, '#00f2fe', 'Kanan');
+
+    const leadHand = rightHand || leftHand;
+    if (leadHand) {
+      this.updateAndDrawMotionTrail(ctx, leadHand[8] || leadHand[0], w, h);
+    }
 
     ctx.restore();
 
@@ -517,6 +517,42 @@ class HandDetector {
       ctx.arc(p.x * w, p.y * h, 5, 0, 2 * Math.PI);
       ctx.fill();
     });
+  }
+
+  // 8. VISUALISASI JEJAK GERAKAN VIDEO DINAMIS (AR NEON TRAJECTORY RIBBON)
+  updateAndDrawMotionTrail(ctx, pt, w, h) {
+    if (!pt) return;
+    const now = performance.now();
+    this.motionTrail.push({ x: pt.x * w, y: pt.y * h, t: now });
+    // Simpan riwayat gerakan 450 milidetik terakhir (maksimal 18 titik)
+    this.motionTrail = this.motionTrail.filter(p => now - p.t <= 450).slice(-18);
+
+    if (this.motionTrail.length < 2) return;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (let i = 1; i < this.motionTrail.length; i++) {
+      const p1 = this.motionTrail[i - 1];
+      const p2 = this.motionTrail[i];
+      const alpha = (i / this.motionTrail.length);
+      ctx.lineWidth = 1.5 + alpha * 5.5;
+      ctx.strokeStyle = `rgba(0, 242, 254, ${alpha * 0.75})`;
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+
+      // Titik bercahaya di ujung kepala gerakan
+      if (i === this.motionTrail.length - 1) {
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(p2.x, p2.y, 4, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
   }
 
   // Pembantu tangan dari pose
