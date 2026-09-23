@@ -1,6 +1,11 @@
 # 🤟 SignAI - Penerjemah Bahasa Isyarat Kamera ke Teks Real-Time
 
-Aplikasi web cerdas berbasis AI Vision untuk mendeteksi gerakan tangan dan bahasa isyarat (**SIBI & ASL**) melalui kamera webcam secara real-time, menerjemahkannya ke teks langsung tepat di bawah layar kamera, serta dilengkapi sintesis suara (**Text-to-Speech**) Bahasa Indonesia.
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/martintomss/Aplikasi-Penerjemah-Bahasa-Isyarat-AI)
+
+Aplikasi web cerdas berbasis AI Vision untuk mendeteksi gerakan tubuh, tangan, dan bahasa isyarat (**SIBI & BISINDO**) melalui kamera webcam secara real-time, menerjemahkannya ke teks langsung tepat di bawah layar kamera, serta dilengkapi sintesis suara (**Text-to-Speech**) Bahasa Indonesia.
+
+🌐 **Demo Live di Netlify**: [http://chic-shortbread-fdf902.netlify.app](http://chic-shortbread-fdf902.netlify.app)  
+*(Password sementara deploy: `My-Drop-Site` — atau klaim ke akun Netlify Anda)*
 
 ---
 
