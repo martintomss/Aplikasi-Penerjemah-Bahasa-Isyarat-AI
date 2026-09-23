@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SignAI Full-Body - Penerjemah Bahasa Isyarat AI (Kepala, Badan, Tangan, Kaki)</title>
+  <meta name="description" content="Aplikasi penerjemah bahasa isyarat real-time dengan pelacakan seluruh anggota tubuh (kepala, torso/badan, tangan, dan kaki) menggunakan MediaPipe Holistic AI.">
+  
+  <!-- MediaPipe AI Vision Dependencies (Holistic, Pose, Hands & Camera) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- 1. Header Aplikasi -->
+  <header class="app-header">
+    <div class="header-brand">
+      <div class="brand-icon">🧍</div>
+      <div>
+        <h1 class="brand-title">SignAI Full-Body Pro</h1>
+        <div class="brand-subtitle">AI Motion Sensor &bull; Kepala, Badan, Tangan, Kaki (Holistic)</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-secondary" id="openDictBtn" title="Buka Kamus Isyarat">
+        <span>📖</span>
+        <span>Kamus Isyarat (50+)</span>
+      </button>
+      <button class="btn btn-secondary btn-icon-only" id="muteToggleBtn" title="Pengaturan Suara">
+        🔊
+      </button>
+    </div>
+  </header>
+
+  <!-- 2. Kontainer Utama -->
+  <main class="main-container">
+
+    <!-- Kolom Kiri: Kamera Viewport + Papan Teks Terjemahan di Bawahnya -->
+    <div class="left-column">
+      <div class="camera-card">
+        
+        <!-- Header Bar Kamera -->
+        <div class="camera-card-header">
+          <div class="status-indicator">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Sensor Siap</span>
+          </div>
+          <div class="camera-controls-mini">
+            <span class="hud-badge" id="sensorStatusBadge">🧍 Full-Body AI</span>
+            <span class="hud-badge" id="handsCountBadge">0 Tangan</span>
+            <span class="hud-badge" id="bodyPartBadge">Badan: Menunggu</span>
+            <span class="hud-badge" id="fpsDisplay">0 FPS</span>
+            <select id="modeSelect" style="background: rgba(10,15,28,0.75); border: 1px solid var(--neon-cyan); color: var(--neon-green); border-radius: var(--radius-sm); font-size: 0.75rem; padding: 4px 8px; cursor: pointer; outline: none; font-weight: 600;">
+              <option value="pose" selected>⚡ Full-Body Ringan (60 FPS)</option>
+              <option value="hands">👐 Mode Jari Tangan (60 FPS)</option>
+              <option value="holistic">🧍 Mode Lengkap (Holistic)</option>
+            </select>
+            <select id="sensitivitySelect" style="background: rgba(10,15,28,0.7); border: 1px solid var(--border-glass); color: var(--neon-cyan); border-radius: var(--radius-sm); font-size: 0.75rem; padding: 4px 8px; cursor: pointer; outline: none;">
+              <option value="350">⚡ Respon Cepat (0.35s)</option>
+              <option value="500" selected>⚡ Normal (0.50s)</option>
+              <option value="750">🐢 Santai (0.75s)</option>
+            </select>
+            <button class="btn btn-secondary btn-icon-only" id="mirrorToggleBtn" title="Balik Kamera (Mirror)">
+              🔄
+            </button>
+          </div>
+        </div>
+
+        <!-- Viewport Kamera & Canvas AR -->
+        <div class="viewport-wrapper">
+          <video id="webcamVideo" playsinline></video>
+          <canvas id="arCanvas"></canvas>
+
+          <!-- Placeholder saat kamera belum menyala -->
+          <div class="camera-placeholder" id="cameraPlaceholder">
+            <div class="placeholder-icon">🧍</div>
+            <h2>Nyalakan Sensor Full-Body AI</h2>
+            <p>Mendeteksi seluruh anggota tubuh secara real-time: <strong>Kepala, Badan, Tangan, dan Kaki</strong>.</p>
+            <button class="btn btn-primary" id="startCameraBtn">
+              <span>🚀</span>
+              <span>Aktifkan Sensor Sekarang</span>
+            </button>
+          </div>
+
+          <!-- HUD Overlay Real-time -->
+          <div class="hud-overlay">
+            <div class="hud-top">
+              <div class="hud-badge">HOLISTIC FULL-BODY SENSOR v5.0</div>
+              <div class="hud-badge" id="bodyTrackingState">MENUNGGU SUBJEK</div>
+            </div>
+
+            <!-- Kartu Dinamis Gestur Terdeteksi dengan Progress Ring -->
+            <div class="hud-center-group" style="align-self: center; display: flex; flex-direction: column; align-items: center; gap: 6px;">
+              <div class="hud-gesture-badge" id="hudGestureBadge">
+                <div class="gesture-ring-wrap">
+                  <svg class="gesture-progress-svg" width="44" height="44">
+                    <circle cx="22" cy="22" r="18" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="3"/>
+                    <circle id="gestureProgressCircle" cx="22" cy="22" r="18" fill="none" stroke="#00f2fe" stroke-width="3"
+                            stroke-linecap="round" stroke-dasharray="113.09" stroke-dashoffset="113.09"/>
+                  </svg>
+                  <div class="gesture-icon-inner" id="hudGestureIcon">👋</div>
+                </div>
+                <div class="gesture-info-inner">
+                  <span class="gesture-name" id="hudGestureName">Halo</span>
+                  <span class="gesture-detail" id="hudGestureDetail">95% Cocok</span>
+                </div>
+              </div>
+
+              <!-- Bar Diagnosis Real-Time Setiap Jari -->
+              <div class="hud-diagnostic-bar" id="hudDiagnosticBar" style="display: none;">
+                <span class="diagnostic-pill" id="diagThumb">Jempol</span>
+                <span class="diagnostic-pill" id="diagIndex">Telunjuk</span>
+                <span class="diagnostic-pill" id="diagMiddle">Tengah</span>
+                <span class="diagnostic-pill" id="diagRing">Manis</span>
+                <span class="diagnostic-pill" id="diagPinky">Kelingking</span>
+              </div>
+            </div>
+
+            <!-- Status Anggota Tubuh Terdeteksi di Bagian Bawah HUD -->
+            <div class="hud-bottom-status" style="display: flex; gap: 8px; justify-content: center;">
+              <span class="body-part-tag" id="tagHead">👤 Kepala</span>
+              <span class="body-part-tag" id="tagTorso">🦺 Badan</span>
+              <span class="body-part-tag" id="tagArms">💪 Lengan</span>
+              <span class="body-part-tag" id="tagHands">👐 Tangan</span>
+              <span class="body-part-tag" id="tagLegs">🦵 Kaki</span>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Tombol Matikan Kamera (Muncul saat aktif) -->
+        <div style="padding: 8px 20px; background: rgba(10, 15, 30, 0.3); display: flex; justify-content: flex-end;">
+          <button class="btn btn-danger" id="stopCameraBtn" style="display: none; padding: 6px 14px; font-size: 0.82rem;">
+            <span>⏹</span>
+            <span>Matikan Kamera</span>
+          </button>
+        </div>
+
+        <!-- =========================================================
+             AREA TERJEMAHAN TEKS TEPAT DI BAWAH TAMPILAN KAMERA
+             ========================================================= -->
+        <div class="translation-section">
+          
+          <div class="translation-header">
+            <div class="translation-title-wrap">
+              <span style="font-size: 1.1rem;">📝</span>
+              <span class="translation-label">Hasil Terjemahan Teks Real-Time</span>
+            </div>
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--text-secondary); cursor: pointer;">
+              <input type="checkbox" id="autoSpeakToggle" style="accent-color: var(--neon-cyan);">
+              <span>Suara Otomatis (TTS)</span>
+            </label>
+          </div>
+
+          <!-- Bar Saran Kata Cerdas (Smart Autocomplete Chips) -->
+          <div class="prediction-bar" id="predictionBar" style="display: none;">
+            <span class="prediction-title">💡 Saran Kata:</span>
+            <div class="prediction-chips" id="predictionChips">
+              <!-- Diisi otomatis oleh JavaScript -->
+            </div>
+          </div>
+
+          <!-- Kotak Teks Hasil Terjemahan -->
+          <div class="translation-box-container">
+            <span id="translatedText" class="translated-text"></span>
+            <span id="textPlaceholder" class="translation-placeholder">Teks terjemahan bahasa isyarat akan muncul di sini...</span>
+            <span class="cursor-blink"></span>
+          </div>
+
+          <!-- Toolbar Kontrol Aksi Teks -->
+          <div class="translation-actions">
+            <div class="action-group">
+              <button class="btn btn-primary" id="speakBtn" title="Bacakan teks dengan suara bahasa Indonesia">
+                <span>🗣️</span>
+                <span>Bicara (Suara)</span>
+              </button>
+              <button class="btn btn-secondary" id="copyBtn" title="Salin teks ke clipboard">
+                <span>📋</span>
+                <span>Salin Teks</span>
+              </button>
+            </div>
+
+            <div class="action-group">
+              <button class="btn btn-secondary" id="spaceBtn" title="Tambahkan Spasi">
+                <span>␣</span>
+                <span>Spasi</span>
+              </button>
+              <button class="btn btn-secondary" id="backspaceBtn" title="Hapus Satu Karakter">
+                <span>⌫</span>
+                <span>Hapus</span>
+              </button>
+              <button class="btn btn-danger" id="clearBtn" title="Bersihkan Semua Teks">
+                <span>🗑️</span>
+                <span>Bersihkan</span>
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Kolom Kanan: Mode Latihan & Kamus Cepat -->
+    <aside class="side-panel">
+      
+      <!-- Kartu Mode Latihan Interaktif -->
+      <div class="panel-card">
+        <div class="panel-card-title">
+          <span>🎯 Mode Latihan Isyarat Tubuh</span>
+          <button class="btn btn-secondary" id="nextPracticeBtn" style="padding: 4px 10px; font-size: 0.78rem;">
+            Ganti Target ❯
+          </button>
+        </div>
+        
+        <div class="practice-target-box">
+          <div class="practice-icon" id="practiceIcon">👋</div>
+          <div class="practice-name" id="practiceName">Halo / Hai</div>
+          <div class="practice-guide" id="practiceGuide">
+            Lambaikan tangan terbuka ke kiri dan ke kanan menghadap kamera.
+          </div>
+          <div class="practice-status-badge waiting" id="practiceStatus">
+            Menunggu Pose / Gerakan...
+          </div>
+        </div>
+      </div>
+
+      <!-- Kartu Kamus Cepat dengan Filter Kategori -->
+      <div class="panel-card">
+        <div class="panel-card-title">
+          <span>⚡ Pilihan Isyarat Cepat</span>
+          <span style="font-size: 0.75rem; color: var(--text-muted);">Klik untuk coba</span>
+        </div>
+        <div class="quick-filter-bar" id="quickFilterBar">
+          <button class="filter-chip active" data-cat="all">Semua</button>
+          <button class="filter-chip" data-cat="Salam">Salam</button>
+          <button class="filter-chip" data-cat="Kesopanan">Sopan</button>
+          <button class="filter-chip" data-cat="Afirmasi">Afirmasi</button>
+          <button class="filter-chip" data-cat="Aktivitas">Aktivitas</button>
+          <button class="filter-chip" data-cat="Emosi">Emosi</button>
+          <button class="filter-chip" data-cat="Abjad">Abjad</button>
+          <button class="filter-chip" data-cat="Angka">Angka</button>
+        </div>
+        <div class="dictionary-grid" id="quickDictGrid">
+          <!-- Diisi via JavaScript -->
+        </div>
+      </div>
+
+      <!-- Panduan Singkat Full-Body -->
+      <div class="panel-card" style="font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5;">
+        <div style="font-weight: 700; color: #ffffff; margin-bottom: 6px;">💡 Deteksi Seluruh Tubuh (Full-Body):</div>
+        <ul style="padding-left: 18px; display: flex; flex-direction: column; gap: 4px;">
+          <li>Kamera melacak <strong>Kepala, Dada, Lengan, Tangan, dan Kaki</strong> Anda sekaligus.</li>
+          <li><strong>Makan / Minum:</strong> Dekatkan tangan ke mulut.</li>
+          <li><strong>Terima Kasih:</strong> Tangan dari dekat dagu/dada maju ke depan.</li>
+          <li><strong>Cinta:</strong> Silangkan kedua tangan di depan dada.</li>
+          <li><strong>Tolong:</strong> Tangkupkan kedua tangan di depan dada.</li>
+        </ul>
+      </div>
+
+    </aside>
+
+  </main>
+
+  <!-- 3. Modal Kamus Bahasa Isyarat Lengkap -->
+  <div class="modal-backdrop" id="dictionaryModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 style="font-size: 1.2rem; color: #ffffff; display: flex; align-items: center; gap: 10px;">
+          <span>📖</span>
+          <span>Kamus Bahasa Isyarat Lengkap (SIBI & BISINDO)</span>
+        </h2>
+        <button class="btn btn-secondary btn-icon-only" id="closeDictBtn">✕</button>
+      </div>
+
+      <!-- Filter Kategori di Modal -->
+      <div class="modal-filter-bar" id="modalFilterBar">
+        <button class="modal-filter-btn active" data-filter="all">Semua Kategori</button>
+        <button class="modal-filter-btn" data-filter="Salam">Salam & Sapaan</button>
+        <button class="modal-filter-btn" data-filter="Kesopanan">Kesopanan</button>
+        <button class="modal-filter-btn" data-filter="Afirmasi">Afirmasi & Respon</button>
+        <button class="modal-filter-btn" data-filter="Kata Ganti">Kata Ganti</button>
+        <button class="modal-filter-btn" data-filter="Emosi">Emosi</button>
+        <button class="modal-filter-btn" data-filter="Aktivitas">Aktivitas</button>
+        <button class="modal-filter-btn" data-filter="Abjad">Abjad (A-Z)</button>
+        <button class="modal-filter-btn" data-filter="Angka">Angka (0-10)</button>
+        <button class="modal-filter-btn" data-filter="dynamic">Gerakan Dinamis ⚡</button>
+        <button class="modal-filter-btn" data-filter="twoHands">Dua Tangan 🤲</button>
+      </div>
+
+      <div class="modal-body" id="dictCardsContainer">
+        <!-- Diisi dinamis dari dictionary.js -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast-notice" id="toastNotice">Pemberitahuan</div>
+
+  <!-- Footer -->
+  <footer class="app-footer">
+    SignAI Full-Body Pro &copy; 2026 &bull; MediaPipe Holistic AI Vision (Kepala, Torso, Lengan, Kaki)
+  </footer>
+
+  <!-- Application Scripts -->
+  <script src="js/dictionary.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/sign_recognizer.js"></script>
+  <script src="js/hand_detector.js"></script>
+  <script src="js/text_translator.js"></script>
+  <script src="js/app.js"></script>
+
+</body>
+</html>
