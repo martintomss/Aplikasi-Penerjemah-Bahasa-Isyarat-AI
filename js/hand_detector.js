@@ -27,6 +27,12 @@ class HandDetector {
     this.prevHands = [];
     this.smoothAlpha = 0.7;
 
+    // Cache koordinat AI terbaru untuk rendering 60 FPS non-blocking
+    this.latestPose = null;
+    this.latestHands = [];
+    this.latestLeftHand = null;
+    this.latestRightHand = null;
+
     // Koneksi Pose 33 Titik (Kepala, Torso, Lengan, Kaki)
     this.poseConnections = [
       // Kepala
@@ -60,15 +66,13 @@ class HandDetector {
   // 1. MENYALAKAN KAMERA CEPAT (640x480 atau 1280x720)
   async startCamera(deviceId = null) {
     try {
-      let stream = null;
-      try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 640 }, height: { ideal: 480 } }
-                          : { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, min: 30 } }
+                          : { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, min: 30 } },
           audio: false
         });
       } catch (e) {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, min: 30 } }, audio: false });
       }
 
       this.video.srcObject = stream;
@@ -180,14 +184,17 @@ class HandDetector {
   }
 
   // 3. LOOP PEMROSESAN VIDEO STREAMING NATIVE (LIVE VIDEO INFERENCE)
-  async processFrameLoop() {
+  processFrameLoop() {
     if (!this.isStreaming) return;
 
-    // Deteksi video langsung pada elemen HTMLVideoElement secara kontinu (Stream Video Asli)
+    // A. RENDER VIDEO SECARA REAL-TIME 60 FPS PENUH TANPA TERTUNDA AI
+    if (this.video.readyState >= 2 && !this.video.paused) {
+      this.renderCurrentFrame();
+    }
+
+    // B. JALANKAN INFERENSI AI SECARA ASINKRON (NON-BLOCKING WEBGL)
     if (this.isModelReady && this.aiModel && !this.isInferring && this.video.readyState >= 2 && !this.video.paused) {
       this.isInferring = true;
-
-      // Alirkan stream video langsung ke MediaPipe (WebGL hardware texture tracking antar frame)
       this.aiModel.send({ image: this.video })
         .then(() => { this.isInferring = false; })
         .catch(() => { this.isInferring = false; });
@@ -207,6 +214,55 @@ class HandDetector {
     requestAnimationFrame(() => this.processFrameLoop());
   }
 
+  // RENDER FRAME 60 FPS KE KANVAS
+  renderCurrentFrame() {
+    const ctx = this.ctx;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    if (!w || !h) return;
+
+    ctx.save();
+    ctx.clearRect(0, 0, w, h);
+
+    if (this.isMirrored) {
+      ctx.translate(w, 0);
+      ctx.scale(-1, 1);
+    }
+
+    // Gambar video kamera langsung (60 FPS tanpa jeda / lag)
+    ctx.drawImage(this.video, 0, 0, w, h);
+
+    // Gambar overlay visual kerangka AI terbaru yang sudah dihaluskan
+    if (this.currentMode === 'pose' && this.latestPose) {
+      this.drawFastPoseSkeleton(ctx, this.latestPose, w, h);
+      const handPt = (this.latestPose[16] && (this.latestPose[16].visibility || 1) > 0.35) ? this.latestPose[16]
+                   : ((this.latestPose[15] && (this.latestPose[15].visibility || 1) > 0.35) ? this.latestPose[15] : null);
+      if (handPt) {
+        this.updateAndDrawMotionTrail(ctx, handPt, w, h);
+      }
+    } else if (this.currentMode === 'hands' && this.latestHands && this.latestHands.length > 0) {
+      this.latestHands.forEach((item, idx) => {
+        const color = idx === 0 ? '#00f2fe' : '#b388ff';
+        const label = idx === 0 ? 'Kanan' : 'Kiri';
+        this.drawFastHandSkeleton(ctx, item.landmarks, w, h, color, label);
+      });
+      if (this.latestHands[0] && this.latestHands[0].landmarks) {
+        const leadPt = this.latestHands[0].landmarks[8] || this.latestHands[0].landmarks[0];
+        this.updateAndDrawMotionTrail(ctx, leadPt, w, h);
+      }
+    } else if (this.currentMode === 'holistic') {
+      if (this.latestPose) this.drawFastPoseSkeleton(ctx, this.latestPose, w, h);
+      if (this.latestLeftHand) this.drawFastHandSkeleton(ctx, this.latestLeftHand, w, h, '#00ffa3', 'Kiri');
+      if (this.latestRightHand) this.drawFastHandSkeleton(ctx, this.latestRightHand, w, h, '#00f2fe', 'Kanan');
+      const leadHand = this.latestRightHand || this.latestLeftHand;
+      if (leadHand) {
+        this.updateAndDrawMotionTrail(ctx, leadHand[8] || leadHand[0], w, h);
+      }
+    }
+
+    ctx.restore();
+  }
+
   // Smoothing Landmark
   smooth(curr, prev) {
     if (!curr) return null;
@@ -222,26 +278,11 @@ class HandDetector {
 
   // 4. HASIL DARI MODEL POSE LITE (SUPER RINGAN & CEPAT)
   handlePoseResults(results) {
-    const ctx = this.ctx;
-    const w = this.canvas.width;
-    const h = this.canvas.height;
-    if (!w || !h) return;
-
-    ctx.save();
-    ctx.clearRect(0, 0, w, h);
-
-    if (this.isMirrored) {
-      ctx.translate(w, 0);
-      ctx.scale(-1, 1);
-    }
-
-    ctx.drawImage(this.video, 0, 0, w, h);
-
     const pose = this.smooth(results.poseLandmarks, this.prevPose);
     this.prevPose = pose;
+    this.latestPose = pose;
 
     let bodyStatus = { head: false, torso: false, arms: false, hands: false, legs: false };
-
     if (pose) {
       bodyStatus = {
         head: !!(pose[0] && (pose[0].visibility || 1) > 0.4),
@@ -250,19 +291,7 @@ class HandDetector {
         hands: !!(pose[15] || pose[16]),
         legs: !!(pose[25] && pose[26] && (pose[25].visibility || 1) > 0.3)
       };
-
-      // Gambar Kerangka Full-Body dengan Rendering Super Cepat (Tanpa shadowBlur lambat)
-      this.drawFastPoseSkeleton(ctx, pose, w, h);
-
-      // Gambar jejak gerakan video dinamis (AR Neon Trajectory Trail)
-      const handPt = (pose[16] && (pose[16].visibility || 1) > 0.35) ? pose[16]
-                   : ((pose[15] && (pose[15].visibility || 1) > 0.35) ? pose[15] : null);
-      if (handPt) {
-        this.updateAndDrawMotionTrail(ctx, handPt, w, h);
-      }
     }
-
-    ctx.restore();
 
     // Bangun data tangan dari pose
     const handsList = [];
@@ -272,6 +301,7 @@ class HandDetector {
     if (pose && pose[15] && (pose[15].visibility || 1) > 0.4) {
       handsList.push({ landmarks: this.buildPseudoHand(pose[15], pose[19], pose[21]), handedness: 'Left', trail: [] });
     }
+    this.latestHands = handsList;
 
     if (this.onResults) {
       this.onResults({
@@ -286,38 +316,13 @@ class HandDetector {
 
   // 5. HASIL DARI MODEL HANDS LITE
   handleHandsResults(results) {
-    const ctx = this.ctx;
-    const w = this.canvas.width;
-    const h = this.canvas.height;
-    if (!w || !h) return;
-
-    ctx.save();
-    ctx.clearRect(0, 0, w, h);
-
-    if (this.isMirrored) {
-      ctx.translate(w, 0);
-      ctx.scale(-1, 1);
-    }
-
-    ctx.drawImage(this.video, 0, 0, w, h);
-
     const handsList = [];
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
       results.multiHandLandmarks.forEach((rawLm, idx) => {
-        const color = idx === 0 ? '#00f2fe' : '#b388ff';
-        const label = idx === 0 ? 'Kanan' : 'Kiri';
-        this.drawFastHandSkeleton(ctx, rawLm, w, h, color, label);
         handsList.push({ landmarks: rawLm, handedness: idx === 0 ? 'Right' : 'Left', trail: [] });
       });
-
-      // Jejak gerakan video tangan utama
-      if (results.multiHandLandmarks[0]) {
-        const leadPt = results.multiHandLandmarks[0][8] || results.multiHandLandmarks[0][0];
-        this.updateAndDrawMotionTrail(ctx, leadPt, w, h);
-      }
     }
-
-    ctx.restore();
+    this.latestHands = handsList;
 
     if (this.onResults) {
       this.onResults({
@@ -332,47 +337,23 @@ class HandDetector {
 
   // 6. HASIL DARI MODEL HOLISTIC
   handleHolisticResults(results) {
-    const ctx = this.ctx;
-    const w = this.canvas.width;
-    const h = this.canvas.height;
-    if (!w || !h) return;
-
-    ctx.save();
-    ctx.clearRect(0, 0, w, h);
-
-    if (this.isMirrored) {
-      ctx.translate(w, 0);
-      ctx.scale(-1, 1);
-    }
-
-    ctx.drawImage(this.video, 0, 0, w, h);
-
     const pose = this.smooth(results.poseLandmarks, this.prevPose);
     this.prevPose = pose;
+    this.latestPose = pose;
 
-    const leftHand = results.leftHandLandmarks;
-    const rightHand = results.rightHandLandmarks;
-
-    if (pose) this.drawFastPoseSkeleton(ctx, pose, w, h);
-    if (leftHand) this.drawFastHandSkeleton(ctx, leftHand, w, h, '#00ffa3', 'Kiri');
-    if (rightHand) this.drawFastHandSkeleton(ctx, rightHand, w, h, '#00f2fe', 'Kanan');
-
-    const leadHand = rightHand || leftHand;
-    if (leadHand) {
-      this.updateAndDrawMotionTrail(ctx, leadHand[8] || leadHand[0], w, h);
-    }
-
-    ctx.restore();
+    this.latestLeftHand = results.leftHandLandmarks || null;
+    this.latestRightHand = results.rightHandLandmarks || null;
 
     const handsList = [];
-    if (rightHand) handsList.push({ landmarks: rightHand, handedness: 'Right', trail: [] });
-    if (leftHand) handsList.push({ landmarks: leftHand, handedness: 'Left', trail: [] });
+    if (this.latestRightHand) handsList.push({ landmarks: this.latestRightHand, handedness: 'Right', trail: [] });
+    if (this.latestLeftHand) handsList.push({ landmarks: this.latestLeftHand, handedness: 'Left', trail: [] });
+    this.latestHands = handsList;
 
     if (this.onResults) {
       this.onResults({
         pose,
-        leftHand,
-        rightHand,
+        leftHand: this.latestLeftHand,
+        rightHand: this.latestRightHand,
         hands: handsList,
         bodyStatus: {
           head: !!(pose && pose[0]),
